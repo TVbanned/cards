@@ -1,8 +1,39 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 
+function adjustColor(color, amount) {
+  const num = parseInt(color.slice(1), 16);
+  const r = Math.min(255, Math.max(0, (num >> 16) + amount));
+  const g = Math.min(255, Math.max(0, ((num >> 8) & 0x00FF) + amount));
+  const b = Math.min(255, Math.max(0, (num & 0x0000FF) + amount));
+  return '#' + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
+}
+
+function generateGradient(color) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 400;
+  canvas.height = 500;
+  const ctx = canvas.getContext('2d');
+
+  const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  gradient.addColorStop(0, color);
+  gradient.addColorStop(1, adjustColor(color, -30));
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = 0.1;
+
+  for (let i = 0; i < 50; i++) {
+    ctx.beginPath();
+    ctx.arc(Math.random() * canvas.width, Math.random() * canvas.height, Math.random() * 50, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+  }
+
+  return canvas.toDataURL();
+}
+
 // 作品数据
-const works = [
+const baseWorks = [
   { id: 1, title: "FOLDED MATTER", year: "2020", color: "#F59E0B" },
   { id: 2, title: "WAVE THEORY", year: "2020", color: "#3B82F6" },
   { id: 3, title: "HUMAN SIGNAL", year: "2021", color: "#EF4444" },
@@ -29,12 +60,18 @@ const works = [
   { id: 24, title: "CLEAR VIEW", year: "2026", color: "#DC2626" }
 ];
 
+const works = baseWorks.map((work) => ({
+  ...work,
+  slug: `${work.title.toLowerCase().replace(/\s+/g, '_')}.jpg`,
+  image: generateGradient(work.color)
+}));
+
 // 状态管理
 const currentView = ref('layered');
-const mouseGX = ref(Infinity);
-const mouseGY = ref(Infinity);
-const isMouseInGallery = ref(false);
-const cardStates = ref([]);
+let mouseGX = Infinity;
+let mouseGY = Infinity;
+let isMouseInGallery = false;
+const cardStates = [];
 
 // 布局常量
 const DEG2RAD = Math.PI / 180;
@@ -51,38 +88,9 @@ const DAMPING = 1; // 大幅增加阻尼到0.9，运动更柔和，延迟下落�
 const INFLUENCE_RADIUS = 220;
 
 // 卡片DOM引用
-const cardsRef = ref([]);
+const cardsRef = [];
 const galleryRef = ref(null);
-
-// 生成渐变背景
-const generateGradient = (color) => {
-  const canvas = document.createElement('canvas');
-  canvas.width = 400;
-  canvas.height = 500;
-  const ctx = canvas.getContext('2d');
-
-  const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-  gradient.addColorStop(0, color);
-  gradient.addColorStop(1, adjustColor(color, -30));
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.globalAlpha = 0.1;
-  for (let i = 0; i < 50; i++) {
-    ctx.beginPath();
-    ctx.arc(Math.random() * canvas.width, Math.random() * canvas.height, Math.random() * 50, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-  }
-  return canvas.toDataURL();
-};
-
-const adjustColor = (color, amount) => {
-  const num = parseInt(color.slice(1), 16);
-  const r = Math.min(255, Math.max(0, (num >> 16) + amount));
-  const g = Math.min(255, Math.max(0, ((num >> 8) & 0x00FF) + amount));
-  const b = Math.min(255, Math.max(0, (num & 0x0000FF) + amount));
-  return '#' + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
-};
+let galleryBounds = null;
 
 // 静息位置
 const cardRestX = (index) => {
@@ -96,7 +104,7 @@ const cardRestY = (index) => {
 
 // 获取卡片 transform
 const getLayeredTransform = (index) => {
-  const state = cardStates.value[index];
+  const state = cardStates[index];
   const lift = Math.max(0, Math.min(1, state.lift));
   const n = NUM - 1;
 
@@ -122,8 +130,9 @@ const getLayeredTransform = (index) => {
 
   // z-index
   const zi = 500 - index + Math.round(lift * 500); // 稍微调整一点点
-  if (cardsRef.value[index]) {
-    cardsRef.value[index].style.zIndex = zi;
+  if (cardsRef[index] && state.lastZIndex !== zi) {
+    cardsRef[index].style.zIndex = zi;
+    state.lastZIndex = zi;
   }
 
   return `translateX(${x}px) translateY(${outY}px) translateZ(${tz}px) rotateY(${rotateY}deg) rotateX(${rotateX}deg) rotateZ(${rotateZ}deg) scale(${scaleVal})`;
@@ -132,11 +141,11 @@ const getLayeredTransform = (index) => {
 const getOrbitTransform = (index) => {
   const angle = (index / NUM) * Math.PI * 2;
   const radius = 380;
-  const dynamicAngle = angle + (mouseGX.value / 1000) * 0.5;
+  const dynamicAngle = angle + (mouseGX / 1000) * 0.5;
 
   const x = Math.sin(dynamicAngle) * radius;
   const z = Math.cos(dynamicAngle) * radius - 300;
-  const y = (mouseGY.value / 1000) * 60 * Math.sin(dynamicAngle);
+  const y = (mouseGY / 1000) * 60 * Math.sin(dynamicAngle);
   const rotateY = (dynamicAngle * 180 / Math.PI) + 90;
 
   return `translateX(${x}px) translateY(${y}px) translateZ(${z}px) rotateY(${rotateY}deg)`;
@@ -149,7 +158,7 @@ let animationId = null;
 let closestIndex = -1;
 
 const updatePhysics = () => {
-  if (isMouseInGallery.value) {
+  if (isMouseInGallery) {
     let minDistSq = Infinity;
     closestIndex = -1;
 
@@ -168,10 +177,10 @@ const updatePhysics = () => {
     closestIndex = -1;
   }
 
-  cardStates.value.forEach((state, i) => {
+  cardStates.forEach((state, i) => {
     // 原有的lift物理模拟
     let targetLift;
-    if (i === closestIndex && isMouseInGallery.value) {
+    if (i === closestIndex && isMouseInGallery) {
       targetLift = 1;
     } else {
       targetLift = 0;
@@ -205,7 +214,7 @@ const updatePhysics = () => {
       if (distance >= 0) {
         const spread = 5;
         const weight = Math.max(0, 1 - distance / spread);
-        targetRotateLift = weight * (cardStates.value[closestIndex]?.lift || 0);
+        targetRotateLift = weight * (cardStates[closestIndex]?.lift || 0);
       }
     }
 
@@ -231,60 +240,87 @@ const updatePhysics = () => {
 };
 
 const animate = () => {
-  updatePhysics();
+  if (currentView.value !== 'archive') {
+    updatePhysics();
 
-  cardsRef.value.forEach((card, index) => {
-    if (card) {
+    for (let index = 0; index < cardsRef.length; index++) {
+      const card = cardsRef[index];
+      const state = cardStates[index];
+
+      if (!card || !state) continue;
+
+      let nextTransform = '';
       if (currentView.value === 'layered') {
-        card.style.transform = getLayeredTransform(index);
+        nextTransform = getLayeredTransform(index);
       } else if (currentView.value === 'orbit') {
-        card.style.transform = getOrbitTransform(index);
+        nextTransform = getOrbitTransform(index);
+      }
+
+      if (nextTransform && nextTransform !== state.lastTransform) {
+        card.style.transform = nextTransform;
+        state.lastTransform = nextTransform;
       }
     }
-  });
+  }
 
   animationId = requestAnimationFrame(animate);
 };
 
 // 事件处理
+const updateGalleryBounds = () => {
+  if (galleryRef.value) {
+    galleryBounds = galleryRef.value.getBoundingClientRect();
+  }
+};
+
 const handleMouseMove = (e) => {
-  const rect = galleryRef.value.getBoundingClientRect();
-  mouseGX.value = e.clientX - (rect.left + rect.width / 2);
-  mouseGY.value = e.clientY - (rect.top + rect.height / 2);
+  if (!galleryBounds) updateGalleryBounds();
+  if (!galleryBounds) return;
+
+  mouseGX = e.clientX - (galleryBounds.left + galleryBounds.width / 2);
+  mouseGY = e.clientY - (galleryBounds.top + galleryBounds.height / 2);
 };
 
 const handleMouseEnter = () => {
-  isMouseInGallery.value = true;
+  isMouseInGallery = true;
+  updateGalleryBounds();
 };
 
 const handleMouseLeave = () => {
-  isMouseInGallery.value = false;
+  isMouseInGallery = false;
 };
 
 const setView = (view) => {
   currentView.value = view;
   // 重置物理状态
-  cardStates.value.forEach(s => { 
+  cardStates.forEach(s => {
     s.lift = 0; 
     s.velocity = 0; 
     s.rotateLift = 0;
     s.rotateVelocity = 0;
+    s.lastTransform = '';
+    s.lastZIndex = null;
   });
 };
 
 // 生命周期
 onMounted(() => {
   // 初始化卡片状态
-  cardStates.value = works.map(() => ({ 
-    lift: 0, 
-    velocity: 0, 
-    rotateLift: 0, // 新增：专门用来平滑调整rotateY的状态
-    rotateVelocity: 0 // 新增：对应的速度
-  }));
+  cardStates.splice(0, cardStates.length, ...works.map(() => ({
+    lift: 0,
+    velocity: 0,
+    rotateLift: 0,
+    rotateVelocity: 0,
+    lastTransform: '',
+    lastZIndex: null
+  })));
+  updateGalleryBounds();
+  window.addEventListener('resize', updateGalleryBounds);
   animate();
 });
 
 onUnmounted(() => {
+  window.removeEventListener('resize', updateGalleryBounds);
   if (animationId) {
     cancelAnimationFrame(animationId);
   }
@@ -332,9 +368,9 @@ onUnmounted(() => {
           <div class="card-inner">
             <div class="card-header">Parallax Archive</div>
             <div class="card-title">{{ work.title }}</div>
-            <div class="card-image" :style="{ backgroundImage: `url(${generateGradient(work.color)})` }"></div>
+            <div class="card-image" :style="{ backgroundImage: `url(${work.image})` }"></div>
             <div class="card-footer">
-              <span>{{ work.title.toLowerCase().replace(/\s+/g, '_') }}.jpg</span>
+              <span>{{ work.slug }}</span>
               <span>{{ work.year }}</span>
             </div>
           </div>
