@@ -81,6 +81,8 @@ const STEP_X = CARD_DISTANCE * Math.cos(ANGLE); // 沿着角度的X分量
 const STEP_Y = -CARD_DISTANCE * Math.sin(ANGLE); // 沿着角度的Y分量（向下为正，所以是负的）
 const NUM = works.length;
 const MID = (NUM - 1) / 2;
+const ROTATE_SPREAD = 5;
+const MOTION_EPSILON = 0.0005;
 
 // 物理常量
 const STIFFNESS = 0.1; // 大幅提升速度
@@ -91,6 +93,7 @@ const INFLUENCE_RADIUS = 220;
 const cardsRef = [];
 const galleryRef = ref(null);
 let galleryBounds = null;
+let layeredNeedsFullRender = true;
 
 // 静息位置
 const cardRestX = (index) => {
@@ -156,28 +159,71 @@ let animationId = null;
 
 // 找到离鼠标最近的卡片
 let closestIndex = -1;
+const lastClosestIndex = { value: -1 };
 
-const updatePhysics = () => {
-  if (isMouseInGallery) {
-    let minDistSq = Infinity;
-    closestIndex = -1;
+const isStateActive = (state) => {
+  return (
+    Math.abs(state.lift) > MOTION_EPSILON ||
+    Math.abs(state.velocity) > MOTION_EPSILON ||
+    Math.abs(state.rotateLift) > MOTION_EPSILON ||
+    Math.abs(state.rotateVelocity) > MOTION_EPSILON
+  );
+};
 
-    for (let i = 0; i < NUM; i++) {
-      const cx = cardRestX(i);
-      const cy = cardRestY(i);
-      const dx = mouseGX - cx;
-      const dy = mouseGY - cy;
-      const distSq = dx * dx + dy * dy;
-      if (distSq < minDistSq) {
-        minDistSq = distSq;
-        closestIndex = i;
-      }
-    }
-  } else {
-    closestIndex = -1;
+const settleState = (state) => {
+  if (Math.abs(state.lift) <= MOTION_EPSILON && Math.abs(state.velocity) <= MOTION_EPSILON) {
+    state.lift = 0;
+    state.velocity = 0;
   }
 
+  if (Math.abs(state.rotateLift) <= MOTION_EPSILON && Math.abs(state.rotateVelocity) <= MOTION_EPSILON) {
+    state.rotateLift = 0;
+    state.rotateVelocity = 0;
+  }
+};
+
+const updateClosestIndex = () => {
+  if (!isMouseInGallery || currentView.value !== 'layered') {
+    if (closestIndex !== -1) layeredNeedsFullRender = true;
+    closestIndex = -1;
+    return;
+  }
+
+  let minDistSq = Infinity;
+  let nextClosestIndex = -1;
+
+  for (let i = 0; i < NUM; i++) {
+    const cx = cardRestX(i);
+    const cy = cardRestY(i);
+    const dx = mouseGX - cx;
+    const dy = mouseGY - cy;
+    const distSq = dx * dx + dy * dy;
+    if (distSq < minDistSq) {
+      minDistSq = distSq;
+      nextClosestIndex = i;
+    }
+  }
+
+  if (closestIndex !== nextClosestIndex) {
+    layeredNeedsFullRender = true;
+    lastClosestIndex.value = closestIndex;
+    closestIndex = nextClosestIndex;
+  }
+};
+
+const updatePhysics = () => {
+  let hasActiveMotion = false;
+
   cardStates.forEach((state, i) => {
+    const distance = closestIndex >= 0 ? i - closestIndex : Infinity;
+    const wasNearPrevious = lastClosestIndex.value >= 0 && i >= lastClosestIndex.value && i < lastClosestIndex.value + ROTATE_SPREAD;
+    const isNearCurrent = distance >= 0 && distance < ROTATE_SPREAD;
+    const shouldSimulate = i === closestIndex || isNearCurrent || wasNearPrevious || isStateActive(state);
+
+    if (!shouldSimulate) {
+      return;
+    }
+
     // 原有的lift物理模拟
     let targetLift;
     if (i === closestIndex && isMouseInGallery) {
@@ -210,10 +256,8 @@ const updatePhysics = () => {
     // 新增：rotateLift的物理模拟
     let targetRotateLift = 0;
     if (closestIndex >= 0) {
-      const distance = i - closestIndex;
       if (distance >= 0) {
-        const spread = 5;
-        const weight = Math.max(0, 1 - distance / spread);
+        const weight = Math.max(0, 1 - distance / ROTATE_SPREAD);
         targetRotateLift = weight * (cardStates[closestIndex]?.lift || 0);
       }
     }
@@ -236,27 +280,57 @@ const updatePhysics = () => {
     const rotateDampedVel = rotateDamping * state.rotateVelocity;
     state.rotateVelocity += rotateForce - rotateDampedVel;
     state.rotateLift += state.rotateVelocity;
+
+    settleState(state);
+    if (isStateActive(state)) {
+      hasActiveMotion = true;
+    }
   });
+
+  if (!hasActiveMotion) {
+    lastClosestIndex.value = closestIndex;
+  }
+
+  return hasActiveMotion;
 };
 
 const animate = () => {
-  if (currentView.value !== 'archive') {
+  if (currentView.value === 'layered') {
     updatePhysics();
 
     for (let index = 0; index < cardsRef.length; index++) {
       const card = cardsRef[index];
       const state = cardStates[index];
-
       if (!card || !state) continue;
 
-      let nextTransform = '';
-      if (currentView.value === 'layered') {
-        nextTransform = getLayeredTransform(index);
-      } else if (currentView.value === 'orbit') {
-        nextTransform = getOrbitTransform(index);
-      }
+      const distance = closestIndex >= 0 ? index - closestIndex : Infinity;
+      const wasNearPrevious = lastClosestIndex.value >= 0 && index >= lastClosestIndex.value && index < lastClosestIndex.value + ROTATE_SPREAD;
+      const isNearCurrent = distance >= 0 && distance < ROTATE_SPREAD;
+      const shouldRender =
+        layeredNeedsFullRender ||
+        index === closestIndex ||
+        isNearCurrent ||
+        wasNearPrevious ||
+        isStateActive(state);
 
-      if (nextTransform && nextTransform !== state.lastTransform) {
+      if (!shouldRender) continue;
+
+      const nextTransform = getLayeredTransform(index);
+      if (nextTransform !== state.lastTransform) {
+        card.style.transform = nextTransform;
+        state.lastTransform = nextTransform;
+      }
+    }
+
+    layeredNeedsFullRender = false;
+  } else if (currentView.value === 'orbit') {
+    for (let index = 0; index < cardsRef.length; index++) {
+      const card = cardsRef[index];
+      const state = cardStates[index];
+      if (!card || !state) continue;
+
+      const nextTransform = getOrbitTransform(index);
+      if (nextTransform !== state.lastTransform) {
         card.style.transform = nextTransform;
         state.lastTransform = nextTransform;
       }
@@ -279,19 +353,24 @@ const handleMouseMove = (e) => {
 
   mouseGX = e.clientX - (galleryBounds.left + galleryBounds.width / 2);
   mouseGY = e.clientY - (galleryBounds.top + galleryBounds.height / 2);
+  updateClosestIndex();
 };
 
 const handleMouseEnter = () => {
   isMouseInGallery = true;
   updateGalleryBounds();
+  updateClosestIndex();
 };
 
 const handleMouseLeave = () => {
   isMouseInGallery = false;
+  updateClosestIndex();
 };
 
 const setView = (view) => {
   currentView.value = view;
+  updateClosestIndex();
+  layeredNeedsFullRender = true;
   // 重置物理状态
   cardStates.forEach(s => {
     s.lift = 0; 
