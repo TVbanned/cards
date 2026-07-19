@@ -165,8 +165,8 @@ const updatePhysics = () => {
     for (let i = 0; i < NUM; i++) {
       const cx = cardRestX(i);
       const cy = cardRestY(i);
-      const dx = mouseGX.value - cx;
-      const dy = mouseGY.value - cy;
+      const dx = mouseGX - cx;
+      const dy = mouseGY - cy;
       const distSq = dx * dx + dy * dy;
       if (distSq < minDistSq) {
         minDistSq = distSq;
